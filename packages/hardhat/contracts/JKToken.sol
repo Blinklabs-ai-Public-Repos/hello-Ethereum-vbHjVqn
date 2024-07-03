@@ -20,6 +20,7 @@ contract JKToken is ERC20, Ownable {
         uint256 cliffDuration;
         bool revoked;
         VestingTier tier;
+        uint256 adjustmentFactor;
     }
 
     struct TierVestingRate {
@@ -34,12 +35,12 @@ contract JKToken is ERC20, Ownable {
     event TokensVested(address indexed beneficiary, uint256 amount, VestingTier tier);
     event VestingScheduleCreated(address indexed beneficiary, uint256 amount, VestingTier tier);
     event VestingScheduleRevoked(address indexed beneficiary, uint256 revokedAmount, VestingTier tier);
+    event VestingScheduleAdjusted(address indexed beneficiary, uint256 scheduleIndex, uint256 newAdjustmentFactor);
 
     constructor(string memory name_, string memory symbol_, uint256 initialSupply_) ERC20(name_, symbol_) {
         INITIAL_SUPPLY = initialSupply_ * 10**decimals();
         _mint(_msgSender(), INITIAL_SUPPLY);
         
-        // Initialize tier vesting rates
         tierVestingRates[VestingTier.SEED] = TierVestingRate(10, 15);
         tierVestingRates[VestingTier.PRIVATE] = TierVestingRate(15, 17);
         tierVestingRates[VestingTier.PUBLIC] = TierVestingRate(20, 20);
@@ -77,7 +78,8 @@ contract JKToken is ERC20, Ownable {
             duration: duration,
             cliffDuration: cliffDuration,
             revoked: false,
-            tier: tier
+            tier: tier,
+            adjustmentFactor: 100
         }));
 
         tierTotalAllocation[tier] = tierTotalAllocation[tier].add(amount);
@@ -110,13 +112,14 @@ contract JKToken is ERC20, Ownable {
         uint256 initialRelease = schedule.totalAmount.mul(rate.initialRelease).div(100);
         
         if (block.timestamp >= schedule.startTime.add(schedule.duration)) {
-            return schedule.totalAmount;
+            return schedule.totalAmount.mul(schedule.adjustmentFactor).div(100);
         }
         
         uint256 monthsPassed = (block.timestamp.sub(schedule.startTime)).div(30 days);
         uint256 monthlyVesting = schedule.totalAmount.sub(initialRelease).mul(rate.monthlyRelease).div(100);
         uint256 vestedAmount = initialRelease.add(monthlyVesting.mul(monthsPassed));
         
+        vestedAmount = vestedAmount.mul(schedule.adjustmentFactor).div(100);
         return vestedAmount > schedule.totalAmount ? schedule.totalAmount : vestedAmount;
     }
 
@@ -191,5 +194,17 @@ contract JKToken is ERC20, Ownable {
     function getTierVestingRate(VestingTier tier) public view returns (uint256, uint256) {
         TierVestingRate memory rate = tierVestingRates[tier];
         return (rate.initialRelease, rate.monthlyRelease);
+    }
+
+    function adjustVestingSchedule(address beneficiary, uint256 scheduleIndex, uint256 newAdjustmentFactor) public onlyOwner {
+        require(scheduleIndex < vestingSchedules[beneficiary].length, "Invalid schedule index");
+        require(newAdjustmentFactor > 0 && newAdjustmentFactor <= 200, "Adjustment factor must be between 1 and 200");
+        
+        VestingSchedule storage schedule = vestingSchedules[beneficiary][scheduleIndex];
+        require(!schedule.revoked, "Cannot adjust revoked schedule");
+        
+        schedule.adjustmentFactor = newAdjustmentFactor;
+        
+        emit VestingScheduleAdjusted(beneficiary, scheduleIndex, newAdjustmentFactor);
     }
 }
