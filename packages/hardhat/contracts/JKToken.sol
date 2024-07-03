@@ -16,15 +16,17 @@ contract JKToken is ERC20, Ownable {
         uint256 startTime;
         uint256 duration;
         uint256 cliffDuration;
+        bool revoked;
     }
 
     mapping(address => VestingSchedule) public vestingSchedules;
 
     event TokensVested(address indexed beneficiary, uint256 amount);
     event VestingScheduleCreated(address indexed beneficiary, uint256 amount);
+    event VestingScheduleRevoked(address indexed beneficiary, uint256 revokedAmount);
 
     constructor(string memory name_, string memory symbol_) ERC20(name_, symbol_) {
-        _mint(msg.sender, INITIAL_SUPPLY);
+        _mint(_msgSender(), INITIAL_SUPPLY);
     }
 
     function mint(address to, uint256 amount) public onlyOwner {
@@ -57,7 +59,8 @@ contract JKToken is ERC20, Ownable {
             releasedAmount: 0,
             startTime: startTime,
             duration: duration,
-            cliffDuration: cliffDuration
+            cliffDuration: cliffDuration,
+            revoked: false
         });
 
         emit VestingScheduleCreated(beneficiary, amount);
@@ -66,6 +69,7 @@ contract JKToken is ERC20, Ownable {
     function releaseVestedTokens(address beneficiary) public {
         VestingSchedule storage schedule = vestingSchedules[beneficiary];
         require(schedule.totalAmount > 0, "No vesting schedule found for beneficiary");
+        require(!schedule.revoked, "Vesting schedule has been revoked");
 
         uint256 vestedAmount = _calculateVestedAmount(schedule);
         uint256 releaseableAmount = vestedAmount.sub(schedule.releasedAmount);
@@ -90,12 +94,36 @@ contract JKToken is ERC20, Ownable {
 
     function getVestedAmount(address beneficiary) public view returns (uint256) {
         VestingSchedule memory schedule = vestingSchedules[beneficiary];
+        if (schedule.revoked) {
+            return 0;
+        }
         return _calculateVestedAmount(schedule);
     }
 
     function getReleaseableAmount(address beneficiary) public view returns (uint256) {
         VestingSchedule memory schedule = vestingSchedules[beneficiary];
+        if (schedule.revoked) {
+            return 0;
+        }
         uint256 vestedAmount = _calculateVestedAmount(schedule);
         return vestedAmount.sub(schedule.releasedAmount);
+    }
+
+    function revokeVestingSchedule(address beneficiary) public onlyOwner {
+        VestingSchedule storage schedule = vestingSchedules[beneficiary];
+        require(schedule.totalAmount > 0, "No vesting schedule found for beneficiary");
+        require(!schedule.revoked, "Vesting schedule already revoked");
+
+        uint256 vestedAmount = _calculateVestedAmount(schedule);
+        uint256 revokedAmount = schedule.totalAmount.sub(vestedAmount);
+
+        schedule.revoked = true;
+        schedule.totalAmount = vestedAmount;
+
+        if (revokedAmount > 0) {
+            _transfer(address(this), _msgSender(), revokedAmount);
+        }
+
+        emit VestingScheduleRevoked(beneficiary, revokedAmount);
     }
 }
