@@ -8,7 +8,7 @@ import "@openzeppelin/contracts/utils/math/SafeMath.sol";
 contract JKToken is ERC20, Ownable {
     using SafeMath for uint256;
 
-    uint256 private constant INITIAL_SUPPLY = 1000000 * 10**18; // 1 million tokens
+    uint256 private immutable INITIAL_SUPPLY;
 
     struct VestingSchedule {
         uint256 totalAmount;
@@ -24,8 +24,10 @@ contract JKToken is ERC20, Ownable {
     event TokensVested(address indexed beneficiary, uint256 amount);
     event VestingScheduleCreated(address indexed beneficiary, uint256 amount);
     event VestingScheduleRevoked(address indexed beneficiary, uint256 revokedAmount);
+    event VestingScheduleModified(address indexed beneficiary, uint256 newAmount, uint256 newDuration, uint256 newCliffDuration);
 
-    constructor(string memory name_, string memory symbol_) ERC20(name_, symbol_) {
+    constructor(string memory name_, string memory symbol_, uint256 initialSupply_) ERC20(name_, symbol_) {
+        INITIAL_SUPPLY = initialSupply_ * 10**decimals();
         _mint(_msgSender(), INITIAL_SUPPLY);
     }
 
@@ -125,5 +127,36 @@ contract JKToken is ERC20, Ownable {
         }
 
         emit VestingScheduleRevoked(beneficiary, revokedAmount);
+    }
+
+    function modifyVestingSchedule(
+        address beneficiary,
+        uint256 newAmount,
+        uint256 newDuration,
+        uint256 newCliffDuration
+    ) public onlyOwner {
+        VestingSchedule storage schedule = vestingSchedules[beneficiary];
+        require(schedule.totalAmount > 0, "No vesting schedule found for beneficiary");
+        require(!schedule.revoked, "Cannot modify revoked vesting schedule");
+        require(newAmount > 0, "New vesting amount must be greater than 0");
+        require(newDuration > 0, "New vesting duration must be greater than 0");
+        require(newCliffDuration <= newDuration, "New cliff duration cannot exceed new vesting duration");
+
+        uint256 vestedAmount = _calculateVestedAmount(schedule);
+        require(newAmount >= vestedAmount, "New amount cannot be less than already vested amount");
+
+        if (newAmount > schedule.totalAmount) {
+            uint256 additionalAmount = newAmount.sub(schedule.totalAmount);
+            _transfer(_msgSender(), address(this), additionalAmount);
+        } else if (newAmount < schedule.totalAmount) {
+            uint256 excessAmount = schedule.totalAmount.sub(newAmount);
+            _transfer(address(this), _msgSender(), excessAmount);
+        }
+
+        schedule.totalAmount = newAmount;
+        schedule.duration = newDuration;
+        schedule.cliffDuration = newCliffDuration;
+
+        emit VestingScheduleModified(beneficiary, newAmount, newDuration, newCliffDuration);
     }
 }
