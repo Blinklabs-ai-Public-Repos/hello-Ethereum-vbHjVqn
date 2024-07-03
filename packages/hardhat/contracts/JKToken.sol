@@ -21,6 +21,7 @@ contract JKToken is ERC20, Ownable {
         bool revoked;
         VestingTier tier;
         uint256 adjustmentFactor;
+        uint256 performanceMetricId;
     }
 
     struct TierVestingRate {
@@ -28,14 +29,24 @@ contract JKToken is ERC20, Ownable {
         uint256 monthlyRelease;
     }
 
+    struct PerformanceMetric {
+        string name;
+        uint256 threshold;
+        uint256 adjustmentFactor;
+    }
+
     mapping(address => VestingSchedule[]) public vestingSchedules;
     mapping(VestingTier => uint256) public tierTotalAllocation;
     mapping(VestingTier => TierVestingRate) public tierVestingRates;
+    mapping(uint256 => PerformanceMetric) public performanceMetrics;
+    uint256 public performanceMetricCount;
 
     event TokensVested(address indexed beneficiary, uint256 amount, VestingTier tier);
     event VestingScheduleCreated(address indexed beneficiary, uint256 amount, VestingTier tier);
     event VestingScheduleRevoked(address indexed beneficiary, uint256 revokedAmount, VestingTier tier);
     event VestingScheduleAdjusted(address indexed beneficiary, uint256 scheduleIndex, uint256 newAdjustmentFactor);
+    event PerformanceMetricCreated(uint256 indexed metricId, string name, uint256 threshold, uint256 adjustmentFactor);
+    event PerformanceMetricUpdated(uint256 indexed metricId, uint256 newValue);
 
     constructor(string memory name_, string memory symbol_, uint256 initialSupply_) ERC20(name_, symbol_) {
         INITIAL_SUPPLY = initialSupply_ * 10**decimals();
@@ -62,12 +73,14 @@ contract JKToken is ERC20, Ownable {
         uint256 startTime,
         uint256 duration,
         uint256 cliffDuration,
-        VestingTier tier
+        VestingTier tier,
+        uint256 performanceMetricId
     ) public onlyOwner {
         require(beneficiary != address(0), "Beneficiary cannot be zero address");
         require(amount > 0, "Vesting amount must be greater than 0");
         require(duration > 0, "Vesting duration must be greater than 0");
         require(cliffDuration <= duration, "Cliff duration cannot exceed vesting duration");
+        require(performanceMetricId < performanceMetricCount, "Invalid performance metric ID");
 
         _transfer(_msgSender(), address(this), amount);
 
@@ -79,7 +92,8 @@ contract JKToken is ERC20, Ownable {
             cliffDuration: cliffDuration,
             revoked: false,
             tier: tier,
-            adjustmentFactor: 100
+            adjustmentFactor: 100,
+            performanceMetricId: performanceMetricId
         }));
 
         tierTotalAllocation[tier] = tierTotalAllocation[tier].add(amount);
@@ -206,5 +220,31 @@ contract JKToken is ERC20, Ownable {
         schedule.adjustmentFactor = newAdjustmentFactor;
         
         emit VestingScheduleAdjusted(beneficiary, scheduleIndex, newAdjustmentFactor);
+    }
+
+    function createPerformanceMetric(string memory name, uint256 threshold, uint256 adjustmentFactor) public onlyOwner {
+        require(bytes(name).length > 0, "Name cannot be empty");
+        require(threshold > 0, "Threshold must be greater than 0");
+        require(adjustmentFactor > 0 && adjustmentFactor <= 200, "Adjustment factor must be between 1 and 200");
+
+        performanceMetrics[performanceMetricCount] = PerformanceMetric(name, threshold, adjustmentFactor);
+        emit PerformanceMetricCreated(performanceMetricCount, name, threshold, adjustmentFactor);
+        performanceMetricCount++;
+    }
+
+    function updatePerformanceMetric(uint256 metricId, uint256 newValue) public onlyOwner {
+        require(metricId < performanceMetricCount, "Invalid performance metric ID");
+        PerformanceMetric storage metric = performanceMetrics[metricId];
+
+        if (newValue >= metric.threshold) {
+            for (uint256 i = 0; i < vestingSchedules[_msgSender()].length; i++) {
+                if (vestingSchedules[_msgSender()][i].performanceMetricId == metricId) {
+                    vestingSchedules[_msgSender()][i].adjustmentFactor = metric.adjustmentFactor;
+                    emit VestingScheduleAdjusted(_msgSender(), i, metric.adjustmentFactor);
+                }
+            }
+        }
+
+        emit PerformanceMetricUpdated(metricId, newValue);
     }
 }
