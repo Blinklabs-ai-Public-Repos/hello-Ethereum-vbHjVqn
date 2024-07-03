@@ -2,8 +2,11 @@
 pragma solidity ^0.8.9;
 
 import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import "@openzeppelin/contracts/token/ERC721/ERC721.sol";
+import "@openzeppelin/contracts/token/ERC721/extensions/ERC721Enumerable.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/utils/math/SafeMath.sol";
+import "@openzeppelin/contracts/utils/Counters.sol";
 
 contract JKToken is ERC20, Ownable {
     using SafeMath for uint256;
@@ -35,18 +38,30 @@ contract JKToken is ERC20, Ownable {
         uint256 adjustmentFactor;
     }
 
+    struct StakingInfo {
+        uint256 amount;
+        uint256 startTime;
+        uint256 lastRewardTime;
+    }
+
     mapping(address => VestingSchedule[]) public vestingSchedules;
     mapping(VestingTier => uint256) public tierTotalAllocation;
     mapping(VestingTier => TierVestingRate) public tierVestingRates;
     mapping(uint256 => PerformanceMetric) public performanceMetrics;
+    mapping(address => StakingInfo) public stakedTokens;
     uint256 public performanceMetricCount;
+    uint256 public stakingRewardRate;
+    uint256 public totalStaked;
 
-    event TokensVested(address indexed beneficiary, uint256 amount, VestingTier tier);
-    event VestingScheduleCreated(address indexed beneficiary, uint256 amount, VestingTier tier);
-    event VestingScheduleRevoked(address indexed beneficiary, uint256 revokedAmount, VestingTier tier);
-    event VestingScheduleAdjusted(address indexed beneficiary, uint256 scheduleIndex, uint256 newAdjustmentFactor);
-    event PerformanceMetricCreated(uint256 indexed metricId, string name, uint256 threshold, uint256 adjustmentFactor);
+    event TokensVested(address indexed beneficiary, uint256 amount);
+    event VestingScheduleCreated(address indexed beneficiary, uint256 amount);
+    event VestingScheduleRevoked(address indexed beneficiary, uint256 revokedAmount);
+    event VestingScheduleAdjusted(address indexed beneficiary, uint256 scheduleIndex);
+    event PerformanceMetricCreated(uint256 indexed metricId, string name);
     event PerformanceMetricUpdated(uint256 indexed metricId, uint256 newValue);
+    event Staked(address indexed user, uint256 amount);
+    event Unstaked(address indexed user, uint256 amount);
+    event RewardClaimed(address indexed user, uint256 amount);
 
     constructor(string memory name_, string memory symbol_, uint256 initialSupply_) ERC20(name_, symbol_) {
         INITIAL_SUPPLY = initialSupply_ * 10**decimals();
@@ -57,6 +72,8 @@ contract JKToken is ERC20, Ownable {
         tierVestingRates[VestingTier.PUBLIC] = TierVestingRate(20, 20);
         tierVestingRates[VestingTier.TEAM] = TierVestingRate(0, 10);
         tierVestingRates[VestingTier.ADVISOR] = TierVestingRate(5, 12);
+
+        stakingRewardRate = 5; // 5% annual reward rate
     }
 
     function mint(address to, uint256 amount) public onlyOwner {
@@ -98,7 +115,7 @@ contract JKToken is ERC20, Ownable {
 
         tierTotalAllocation[tier] = tierTotalAllocation[tier].add(amount);
 
-        emit VestingScheduleCreated(beneficiary, amount, tier);
+        emit VestingScheduleCreated(beneficiary, amount);
     }
 
     function releaseVestedTokens(address beneficiary, uint256 scheduleIndex) public {
@@ -114,7 +131,7 @@ contract JKToken is ERC20, Ownable {
         schedule.releasedAmount = schedule.releasedAmount.add(releaseableAmount);
         _transfer(address(this), beneficiary, releaseableAmount);
 
-        emit TokensVested(beneficiary, releaseableAmount, schedule.tier);
+        emit TokensVested(beneficiary, releaseableAmount);
     }
 
     function _calculateVestedAmount(VestingSchedule memory schedule) private view returns (uint256) {
@@ -137,114 +154,125 @@ contract JKToken is ERC20, Ownable {
         return vestedAmount > schedule.totalAmount ? schedule.totalAmount : vestedAmount;
     }
 
-    function getVestedAmount(address beneficiary, uint256 scheduleIndex) public view returns (uint256) {
-        require(scheduleIndex < vestingSchedules[beneficiary].length, "Invalid schedule index");
-        VestingSchedule memory schedule = vestingSchedules[beneficiary][scheduleIndex];
-        if (schedule.revoked) {
+    function stake(uint256 amount) public {
+        require(amount > 0, "Cannot stake 0 tokens");
+        require(balanceOf(_msgSender()) >= amount, "Insufficient balance");
+
+        if (stakedTokens[_msgSender()].amount > 0) {
+            claimReward();
+        }
+
+        _transfer(_msgSender(), address(this), amount);
+        stakedTokens[_msgSender()].amount = stakedTokens[_msgSender()].amount.add(amount);
+        stakedTokens[_msgSender()].startTime = block.timestamp;
+        stakedTokens[_msgSender()].lastRewardTime = block.timestamp;
+        totalStaked = totalStaked.add(amount);
+
+        emit Staked(_msgSender(), amount);
+    }
+
+    function unstake(uint256 amount) public {
+        require(stakedTokens[_msgSender()].amount >= amount, "Insufficient staked amount");
+
+        claimReward();
+
+        stakedTokens[_msgSender()].amount = stakedTokens[_msgSender()].amount.sub(amount);
+        totalStaked = totalStaked.sub(amount);
+        _transfer(address(this), _msgSender(), amount);
+
+        emit Unstaked(_msgSender(), amount);
+    }
+
+    function claimReward() public {
+        StakingInfo storage stakingInfo = stakedTokens[_msgSender()];
+        require(stakingInfo.amount > 0, "No staked tokens");
+
+        uint256 reward = calculateReward(_msgSender());
+        require(reward > 0, "No reward to claim");
+
+        stakingInfo.lastRewardTime = block.timestamp;
+        _mint(_msgSender(), reward);
+
+        emit RewardClaimed(_msgSender(), reward);
+    }
+
+    function calculateReward(address user) public view returns (uint256) {
+        StakingInfo memory stakingInfo = stakedTokens[user];
+        if (stakingInfo.amount == 0) {
             return 0;
         }
-        return _calculateVestedAmount(schedule);
+
+        uint256 stakingDuration = block.timestamp.sub(stakingInfo.lastRewardTime);
+        return stakingInfo.amount.mul(stakingRewardRate).mul(stakingDuration).div(365 days).div(100);
     }
 
-    function getReleaseableAmount(address beneficiary, uint256 scheduleIndex) public view returns (uint256) {
-        require(scheduleIndex < vestingSchedules[beneficiary].length, "Invalid schedule index");
-        VestingSchedule memory schedule = vestingSchedules[beneficiary][scheduleIndex];
-        if (schedule.revoked) {
-            return 0;
-        }
-        uint256 vestedAmount = _calculateVestedAmount(schedule);
-        return vestedAmount.sub(schedule.releasedAmount);
+    function setStakingRewardRate(uint256 newRate) public onlyOwner {
+        require(newRate > 0, "Reward rate must be greater than 0");
+        stakingRewardRate = newRate;
+    }
+}
+
+contract JKLoyaltyProgram is ERC721Enumerable, Ownable {
+    using Counters for Counters.Counter;
+    Counters.Counter private _tokenIds;
+
+    bool public isTransferable;
+    JKToken public jkToken;
+
+    mapping(uint256 => uint256) public tokenPoints;
+
+    event RewardMinted(address indexed user, uint256 tokenId, uint256 points);
+    event RewardRedeemed(address indexed user, uint256 tokenId, uint256 points);
+    event TransferabilitySet(bool isTransferable);
+
+    constructor(string memory name_, string memory symbol_, address jkTokenAddress) ERC721(name_, symbol_) {
+        jkToken = JKToken(jkTokenAddress);
+        isTransferable = false;
     }
 
-    function revokeVestingSchedule(address beneficiary, uint256 scheduleIndex) public onlyOwner {
-        require(scheduleIndex < vestingSchedules[beneficiary].length, "Invalid schedule index");
-        VestingSchedule storage schedule = vestingSchedules[beneficiary][scheduleIndex];
-        require(!schedule.revoked, "Vesting schedule already revoked");
+    function mintReward(address user, uint256 points) public onlyOwner {
+        _tokenIds.increment();
+        uint256 newTokenId = _tokenIds.current();
+        _safeMint(user, newTokenId);
+        tokenPoints[newTokenId] = points;
 
-        uint256 vestedAmount = _calculateVestedAmount(schedule);
-        uint256 revokedAmount = schedule.totalAmount.sub(vestedAmount);
-
-        schedule.revoked = true;
-        schedule.totalAmount = vestedAmount;
-
-        if (revokedAmount > 0) {
-            _transfer(address(this), _msgSender(), revokedAmount);
-            tierTotalAllocation[schedule.tier] = tierTotalAllocation[schedule.tier].sub(revokedAmount);
-        }
-
-        emit VestingScheduleRevoked(beneficiary, revokedAmount, schedule.tier);
+        emit RewardMinted(user, newTokenId, points);
     }
 
-    function getTotalVestedAmount(address beneficiary) public view returns (uint256) {
-        uint256 totalVested = 0;
-        for (uint256 i = 0; i < vestingSchedules[beneficiary].length; i++) {
-            totalVested = totalVested.add(getVestedAmount(beneficiary, i));
-        }
-        return totalVested;
+    function redeemReward(uint256 tokenId) public {
+        require(_exists(tokenId), "Token does not exist");
+        require(ownerOf(tokenId) == _msgSender(), "Not the owner of the token");
+
+        uint256 points = tokenPoints[tokenId];
+        require(points > 0, "No points associated with this token");
+
+        delete tokenPoints[tokenId];
+        _burn(tokenId);
+
+        jkToken.mint(_msgSender(), points);
+
+        emit RewardRedeemed(_msgSender(), tokenId, points);
     }
 
-    function getTotalReleaseableAmount(address beneficiary) public view returns (uint256) {
-        uint256 totalReleaseable = 0;
-        for (uint256 i = 0; i < vestingSchedules[beneficiary].length; i++) {
-            totalReleaseable = totalReleaseable.add(getReleaseableAmount(beneficiary, i));
-        }
-        return totalReleaseable;
+    function setTransferable(bool _isTransferable) public onlyOwner {
+        isTransferable = _isTransferable;
+        emit TransferabilitySet(_isTransferable);
     }
 
-    function getTierTotalAllocation(VestingTier tier) public view returns (uint256) {
-        return tierTotalAllocation[tier];
+    function _beforeTokenTransfer(address from, address to, uint256 tokenId, uint256 batchSize)
+        internal
+        override(ERC721Enumerable)
+    {
+        require(isTransferable || from == address(0) || to == address(0), "Transfers are currently disabled");
+        super._beforeTokenTransfer(from, to, tokenId, batchSize);
     }
 
-    function getVestingSchedulesCount(address beneficiary) public view returns (uint256) {
-        return vestingSchedules[beneficiary].length;
-    }
-
-    function setTierVestingRate(VestingTier tier, uint256 initialRelease, uint256 monthlyRelease) public onlyOwner {
-        require(initialRelease <= 100, "Initial release percentage cannot exceed 100");
-        require(monthlyRelease <= 100, "Monthly release percentage cannot exceed 100");
-        tierVestingRates[tier] = TierVestingRate(initialRelease, monthlyRelease);
-    }
-
-    function getTierVestingRate(VestingTier tier) public view returns (uint256, uint256) {
-        TierVestingRate memory rate = tierVestingRates[tier];
-        return (rate.initialRelease, rate.monthlyRelease);
-    }
-
-    function adjustVestingSchedule(address beneficiary, uint256 scheduleIndex, uint256 newAdjustmentFactor) public onlyOwner {
-        require(scheduleIndex < vestingSchedules[beneficiary].length, "Invalid schedule index");
-        require(newAdjustmentFactor > 0 && newAdjustmentFactor <= 200, "Adjustment factor must be between 1 and 200");
-        
-        VestingSchedule storage schedule = vestingSchedules[beneficiary][scheduleIndex];
-        require(!schedule.revoked, "Cannot adjust revoked schedule");
-        
-        schedule.adjustmentFactor = newAdjustmentFactor;
-        
-        emit VestingScheduleAdjusted(beneficiary, scheduleIndex, newAdjustmentFactor);
-    }
-
-    function createPerformanceMetric(string memory name, uint256 threshold, uint256 adjustmentFactor) public onlyOwner {
-        require(bytes(name).length > 0, "Name cannot be empty");
-        require(threshold > 0, "Threshold must be greater than 0");
-        require(adjustmentFactor > 0 && adjustmentFactor <= 200, "Adjustment factor must be between 1 and 200");
-
-        performanceMetrics[performanceMetricCount] = PerformanceMetric(name, threshold, adjustmentFactor);
-        emit PerformanceMetricCreated(performanceMetricCount, name, threshold, adjustmentFactor);
-        performanceMetricCount++;
-    }
-
-    function updatePerformanceMetric(uint256 metricId, uint256 newValue) public onlyOwner {
-        require(metricId < performanceMetricCount, "Invalid performance metric ID");
-        PerformanceMetric storage metric = performanceMetrics[metricId];
-
-        if (newValue >= metric.threshold) {
-            for (uint256 i = 0; i < vestingSchedules[_msgSender()].length; i++) {
-                if (vestingSchedules[_msgSender()][i].performanceMetricId == metricId) {
-                    vestingSchedules[_msgSender()][i].adjustmentFactor = metric.adjustmentFactor;
-                    emit VestingScheduleAdjusted(_msgSender(), i, metric.adjustmentFactor);
-                }
-            }
-        }
-
-        emit PerformanceMetricUpdated(metricId, newValue);
+    function supportsInterface(bytes4 interfaceId)
+        public
+        view
+        override(ERC721Enumerable)
+        returns (bool)
+    {
+        return super.supportsInterface(interfaceId);
     }
 }
