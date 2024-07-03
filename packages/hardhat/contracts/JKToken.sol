@@ -10,6 +10,8 @@ contract JKToken is ERC20, Ownable {
 
     uint256 private immutable INITIAL_SUPPLY;
 
+    enum VestingTier { SEED, PRIVATE, PUBLIC, TEAM, ADVISOR }
+
     struct VestingSchedule {
         uint256 totalAmount;
         uint256 releasedAmount;
@@ -17,14 +19,15 @@ contract JKToken is ERC20, Ownable {
         uint256 duration;
         uint256 cliffDuration;
         bool revoked;
+        VestingTier tier;
     }
 
-    mapping(address => VestingSchedule) public vestingSchedules;
+    mapping(address => VestingSchedule[]) public vestingSchedules;
+    mapping(VestingTier => uint256) public tierTotalAllocation;
 
-    event TokensVested(address indexed beneficiary, uint256 amount);
-    event VestingScheduleCreated(address indexed beneficiary, uint256 amount);
-    event VestingScheduleRevoked(address indexed beneficiary, uint256 revokedAmount);
-    event VestingScheduleModified(address indexed beneficiary, uint256 newAmount, uint256 newDuration, uint256 newCliffDuration);
+    event TokensVested(address indexed beneficiary, uint256 amount, VestingTier tier);
+    event VestingScheduleCreated(address indexed beneficiary, uint256 amount, VestingTier tier);
+    event VestingScheduleRevoked(address indexed beneficiary, uint256 revokedAmount, VestingTier tier);
 
     constructor(string memory name_, string memory symbol_, uint256 initialSupply_) ERC20(name_, symbol_) {
         INITIAL_SUPPLY = initialSupply_ * 10**decimals();
@@ -44,33 +47,34 @@ contract JKToken is ERC20, Ownable {
         uint256 amount,
         uint256 startTime,
         uint256 duration,
-        uint256 cliffDuration
+        uint256 cliffDuration,
+        VestingTier tier
     ) public onlyOwner {
         require(beneficiary != address(0), "Beneficiary cannot be zero address");
         require(amount > 0, "Vesting amount must be greater than 0");
         require(duration > 0, "Vesting duration must be greater than 0");
         require(cliffDuration <= duration, "Cliff duration cannot exceed vesting duration");
 
-        VestingSchedule storage schedule = vestingSchedules[beneficiary];
-        require(schedule.totalAmount == 0, "Vesting schedule already exists for beneficiary");
-
         _transfer(_msgSender(), address(this), amount);
 
-        vestingSchedules[beneficiary] = VestingSchedule({
+        vestingSchedules[beneficiary].push(VestingSchedule({
             totalAmount: amount,
             releasedAmount: 0,
             startTime: startTime,
             duration: duration,
             cliffDuration: cliffDuration,
-            revoked: false
-        });
+            revoked: false,
+            tier: tier
+        }));
 
-        emit VestingScheduleCreated(beneficiary, amount);
+        tierTotalAllocation[tier] = tierTotalAllocation[tier].add(amount);
+
+        emit VestingScheduleCreated(beneficiary, amount, tier);
     }
 
-    function releaseVestedTokens(address beneficiary) public {
-        VestingSchedule storage schedule = vestingSchedules[beneficiary];
-        require(schedule.totalAmount > 0, "No vesting schedule found for beneficiary");
+    function releaseVestedTokens(address beneficiary, uint256 scheduleIndex) public {
+        require(scheduleIndex < vestingSchedules[beneficiary].length, "Invalid schedule index");
+        VestingSchedule storage schedule = vestingSchedules[beneficiary][scheduleIndex];
         require(!schedule.revoked, "Vesting schedule has been revoked");
 
         uint256 vestedAmount = _calculateVestedAmount(schedule);
@@ -81,7 +85,7 @@ contract JKToken is ERC20, Ownable {
         schedule.releasedAmount = schedule.releasedAmount.add(releaseableAmount);
         _transfer(address(this), beneficiary, releaseableAmount);
 
-        emit TokensVested(beneficiary, releaseableAmount);
+        emit TokensVested(beneficiary, releaseableAmount, schedule.tier);
     }
 
     function _calculateVestedAmount(VestingSchedule memory schedule) private view returns (uint256) {
@@ -94,16 +98,18 @@ contract JKToken is ERC20, Ownable {
         return schedule.totalAmount.mul(block.timestamp.sub(schedule.startTime)).div(schedule.duration);
     }
 
-    function getVestedAmount(address beneficiary) public view returns (uint256) {
-        VestingSchedule memory schedule = vestingSchedules[beneficiary];
+    function getVestedAmount(address beneficiary, uint256 scheduleIndex) public view returns (uint256) {
+        require(scheduleIndex < vestingSchedules[beneficiary].length, "Invalid schedule index");
+        VestingSchedule memory schedule = vestingSchedules[beneficiary][scheduleIndex];
         if (schedule.revoked) {
             return 0;
         }
         return _calculateVestedAmount(schedule);
     }
 
-    function getReleaseableAmount(address beneficiary) public view returns (uint256) {
-        VestingSchedule memory schedule = vestingSchedules[beneficiary];
+    function getReleaseableAmount(address beneficiary, uint256 scheduleIndex) public view returns (uint256) {
+        require(scheduleIndex < vestingSchedules[beneficiary].length, "Invalid schedule index");
+        VestingSchedule memory schedule = vestingSchedules[beneficiary][scheduleIndex];
         if (schedule.revoked) {
             return 0;
         }
@@ -111,9 +117,9 @@ contract JKToken is ERC20, Ownable {
         return vestedAmount.sub(schedule.releasedAmount);
     }
 
-    function revokeVestingSchedule(address beneficiary) public onlyOwner {
-        VestingSchedule storage schedule = vestingSchedules[beneficiary];
-        require(schedule.totalAmount > 0, "No vesting schedule found for beneficiary");
+    function revokeVestingSchedule(address beneficiary, uint256 scheduleIndex) public onlyOwner {
+        require(scheduleIndex < vestingSchedules[beneficiary].length, "Invalid schedule index");
+        VestingSchedule storage schedule = vestingSchedules[beneficiary][scheduleIndex];
         require(!schedule.revoked, "Vesting schedule already revoked");
 
         uint256 vestedAmount = _calculateVestedAmount(schedule);
@@ -124,39 +130,33 @@ contract JKToken is ERC20, Ownable {
 
         if (revokedAmount > 0) {
             _transfer(address(this), _msgSender(), revokedAmount);
+            tierTotalAllocation[schedule.tier] = tierTotalAllocation[schedule.tier].sub(revokedAmount);
         }
 
-        emit VestingScheduleRevoked(beneficiary, revokedAmount);
+        emit VestingScheduleRevoked(beneficiary, revokedAmount, schedule.tier);
     }
 
-    function modifyVestingSchedule(
-        address beneficiary,
-        uint256 newAmount,
-        uint256 newDuration,
-        uint256 newCliffDuration
-    ) public onlyOwner {
-        VestingSchedule storage schedule = vestingSchedules[beneficiary];
-        require(schedule.totalAmount > 0, "No vesting schedule found for beneficiary");
-        require(!schedule.revoked, "Cannot modify revoked vesting schedule");
-        require(newAmount > 0, "New vesting amount must be greater than 0");
-        require(newDuration > 0, "New vesting duration must be greater than 0");
-        require(newCliffDuration <= newDuration, "New cliff duration cannot exceed new vesting duration");
-
-        uint256 vestedAmount = _calculateVestedAmount(schedule);
-        require(newAmount >= vestedAmount, "New amount cannot be less than already vested amount");
-
-        if (newAmount > schedule.totalAmount) {
-            uint256 additionalAmount = newAmount.sub(schedule.totalAmount);
-            _transfer(_msgSender(), address(this), additionalAmount);
-        } else if (newAmount < schedule.totalAmount) {
-            uint256 excessAmount = schedule.totalAmount.sub(newAmount);
-            _transfer(address(this), _msgSender(), excessAmount);
+    function getTotalVestedAmount(address beneficiary) public view returns (uint256) {
+        uint256 totalVested = 0;
+        for (uint256 i = 0; i < vestingSchedules[beneficiary].length; i++) {
+            totalVested = totalVested.add(getVestedAmount(beneficiary, i));
         }
+        return totalVested;
+    }
 
-        schedule.totalAmount = newAmount;
-        schedule.duration = newDuration;
-        schedule.cliffDuration = newCliffDuration;
+    function getTotalReleaseableAmount(address beneficiary) public view returns (uint256) {
+        uint256 totalReleaseable = 0;
+        for (uint256 i = 0; i < vestingSchedules[beneficiary].length; i++) {
+            totalReleaseable = totalReleaseable.add(getReleaseableAmount(beneficiary, i));
+        }
+        return totalReleaseable;
+    }
 
-        emit VestingScheduleModified(beneficiary, newAmount, newDuration, newCliffDuration);
+    function getTierTotalAllocation(VestingTier tier) public view returns (uint256) {
+        return tierTotalAllocation[tier];
+    }
+
+    function getVestingSchedulesCount(address beneficiary) public view returns (uint256) {
+        return vestingSchedules[beneficiary].length;
     }
 }
