@@ -22,8 +22,14 @@ contract JKToken is ERC20, Ownable {
         VestingTier tier;
     }
 
+    struct TierVestingRate {
+        uint256 initialRelease;
+        uint256 monthlyRelease;
+    }
+
     mapping(address => VestingSchedule[]) public vestingSchedules;
     mapping(VestingTier => uint256) public tierTotalAllocation;
+    mapping(VestingTier => TierVestingRate) public tierVestingRates;
 
     event TokensVested(address indexed beneficiary, uint256 amount, VestingTier tier);
     event VestingScheduleCreated(address indexed beneficiary, uint256 amount, VestingTier tier);
@@ -32,6 +38,13 @@ contract JKToken is ERC20, Ownable {
     constructor(string memory name_, string memory symbol_, uint256 initialSupply_) ERC20(name_, symbol_) {
         INITIAL_SUPPLY = initialSupply_ * 10**decimals();
         _mint(_msgSender(), INITIAL_SUPPLY);
+        
+        // Initialize tier vesting rates
+        tierVestingRates[VestingTier.SEED] = TierVestingRate(10, 15);
+        tierVestingRates[VestingTier.PRIVATE] = TierVestingRate(15, 17);
+        tierVestingRates[VestingTier.PUBLIC] = TierVestingRate(20, 20);
+        tierVestingRates[VestingTier.TEAM] = TierVestingRate(0, 10);
+        tierVestingRates[VestingTier.ADVISOR] = TierVestingRate(5, 12);
     }
 
     function mint(address to, uint256 amount) public onlyOwner {
@@ -92,10 +105,19 @@ contract JKToken is ERC20, Ownable {
         if (block.timestamp < schedule.startTime.add(schedule.cliffDuration)) {
             return 0;
         }
+        
+        TierVestingRate memory rate = tierVestingRates[schedule.tier];
+        uint256 initialRelease = schedule.totalAmount.mul(rate.initialRelease).div(100);
+        
         if (block.timestamp >= schedule.startTime.add(schedule.duration)) {
             return schedule.totalAmount;
         }
-        return schedule.totalAmount.mul(block.timestamp.sub(schedule.startTime)).div(schedule.duration);
+        
+        uint256 monthsPassed = (block.timestamp.sub(schedule.startTime)).div(30 days);
+        uint256 monthlyVesting = schedule.totalAmount.sub(initialRelease).mul(rate.monthlyRelease).div(100);
+        uint256 vestedAmount = initialRelease.add(monthlyVesting.mul(monthsPassed));
+        
+        return vestedAmount > schedule.totalAmount ? schedule.totalAmount : vestedAmount;
     }
 
     function getVestedAmount(address beneficiary, uint256 scheduleIndex) public view returns (uint256) {
@@ -158,5 +180,16 @@ contract JKToken is ERC20, Ownable {
 
     function getVestingSchedulesCount(address beneficiary) public view returns (uint256) {
         return vestingSchedules[beneficiary].length;
+    }
+
+    function setTierVestingRate(VestingTier tier, uint256 initialRelease, uint256 monthlyRelease) public onlyOwner {
+        require(initialRelease <= 100, "Initial release percentage cannot exceed 100");
+        require(monthlyRelease <= 100, "Monthly release percentage cannot exceed 100");
+        tierVestingRates[tier] = TierVestingRate(initialRelease, monthlyRelease);
+    }
+
+    function getTierVestingRate(VestingTier tier) public view returns (uint256, uint256) {
+        TierVestingRate memory rate = tierVestingRates[tier];
+        return (rate.initialRelease, rate.monthlyRelease);
     }
 }
